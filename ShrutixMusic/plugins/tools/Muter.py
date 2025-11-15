@@ -1,13 +1,14 @@
 from ShrutixMusic import app
 from pyrogram import filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 import asyncio
 import re
 
-BOT_OWNER_ID = 7081885854   # ← यहाँ अपनी Telegram ID डालना
+# अपना बॉट ओनर आईडी यहाँ डालें
+BOT_OWNER_ID = 7081885854
 
 def parse_duration(duration_str):
-    match = re.match(r"(\d+)([smh]?)", duration_str)
+    match = re.match(r"(\\d+)([smh]?)", duration_str)
     if not match:
         return None
     value, unit = int(match.group(1)), match.group(2).lower()
@@ -24,66 +25,67 @@ async def is_admin(client, chat_id, user_id):
     member = await client.get_chat_member(chat_id, user_id)
     return member.status in ["administrator", "creator"]
 
-
-# /start — बटन दिखेगा (सिर्फ ग्रुप में)
-@app.on_message(filters.command("start") & filters.group)
-async def start_cmd(client, message):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Mute", callback_data="amute_help")],
-        [InlineKeyboardButton("Unmute", callback_data="aunmute_help")]
-    ])
-    await message.reply(
-        "👇 नीचे दिए गए बटन से म्यूट/अनम्यूट कमांड का उपयोग सीखे",
-        reply_markup=keyboard
-    )
-
-
-# बटन क्लिक
-@app.on_callback_query()
-async def cb_handler(client, cq):
-    if not await is_admin(client, cq.message.chat.id, cq.from_user.id):
-        await cq.answer("यह सिर्फ एडमिन / ओनर के लिए है।", show_alert=True)
+@app.on_message(filters.command("amute", prefixes="/") & filters.group)
+async def amute(client, message: Message):
+    if not await is_admin(client, message.chat.id, message.from_user.id):
+        await message.reply("यह कमांड सिर्फ ग्रुप के एडमिन या बॉट के ओनर ही इस्तेमाल कर सकते हैं।")
         return
 
-    if cq.data == "amute_help":
-        await cq.answer("म्यूट के लिए:\n/amute 30s (या 5m, 1h)\nरिप्लाई में यूज़र चुनें।", show_alert=True)
+    if not message.reply_to_message and not message.entities:
+        await message.reply("कृपया किसी यूज़र को टैग या रिप्लाई करके और टाइम देकर कमांड चलाएँ, जैसे `/amute 30s` या `/amute 5m`.")
+        return
 
-    if cq.data == "aunmute_help":
-        await cq.answer("अनम्यूट के लिए:\n/aunmute\nरिप्लाई में यूज़र चुनें।", show_alert=True)
-
-
-# /amute
-@app.on_message(filters.command("amute", prefixes="/") & filters.group)
-async def amute(client, message):
-    if not await is_admin(client, message.chat.id, message.from_user.id):
-        return await message.reply("सिर्फ एडमिन / ओनर यूज़ कर सकते हैं।")
-
-    if not message.reply_to_message:
-        return await message.reply("किसी यूज़र के मैसेज पर रिप्लाई करके टाइम दें: /amute 30s")
-
+    # ड्यूरेशन पार्स करें
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return await message.reply("टाइम देना ज़रूरी है! जैसे: /amute 30s")
+        await message.reply("आपको म्यूट का समय देना होगा। जैसे `/amute 30s` या `/amute 5m`.")
+        return
 
     duration = parse_duration(parts[1])
-    target = message.reply_to_message.from_user.id
+    if duration is None:
+        await message.reply("अमान्य समय दिया गया है। कृपया सही फॉर्मैट में समय दें, जैसे 30s, 5m, 1h.")
+        return
 
-    await message.reply(f"User `{target}` को {duration} सेकंड के लिए म्यूट किया जा रहा है।")
+    # जिस यूज़र को म्यूट करना है उसे पहचानें (रिप्लाई या टैग से)
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.id
+    else:
+        target_user_id = None
+        for entity in message.entities:
+            if entity.type == "text_mention":
+                target_user_id = entity.user.id
+                break
+            elif entity.type == "mention":
+                user = entity
+                try:
+                    user_data = await client.get_users(user.text)
+                    target_user_id = user_data.id
+                    break
+                except Exception as e:
+                    await message.reply("इस यूज़र को पहचानने में दिक्कत हुई। कृपया सही यूज़र टैग करें।")
+                    return
+        
+        if not target_user_id:
+            await message.reply("यूज़र को पहचान नहीं पाया। कृपया सही से टैग करें।")
+            return
 
-    end = asyncio.get_event_loop().time() + duration
-    while asyncio.get_event_loop().time() < end:
-        async for msg in client.search_messages(message.chat.id, from_user=target):
+    await message.reply(f"यूज़र {target_user_id} को {duration} सेकंड के लिए म्यूट किया जा रहा है।")
+
+    end_time = asyncio.get_event_loop().time() + duration
+    while asyncio.get_event_loop().time() < end_time:
+        async for msg in client.search_messages(message.chat.id, from_user=target_user_id):
             await msg.delete()
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
-
-# /aunmute
-@app.on_message(filters.command("aunmute") & filters.group)
-async def aunmute(client, message):
+@app.on_message(filters.command("aunmute", prefixes="/") & filters.group)
+async def aunmute(client, message: Message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
-        return await message.reply("सिर्फ एडमिन / ओनर यूज़ कर सकते हैं।")
+        await message.reply("यह कमांड सिर्फ ग्रुप के एडमिन या बॉट के ओनर ही इस्तेमाल कर सकते हैं।")
+        return
 
-    if not message.reply_to_message:
-        return await message.reply("अनम्यूट करने के लिए किसी यूज़र के मैसेज पर रिप्लाई करें।")
+    if not message.reply_to_message and not message.entities:
+        await message.reply("कृपया अनम्यूट करने के लिए किसी यूज़र के मैसेज पर रिप्लाई करें या उसे टैग करें।")
+        return
 
-    await message.reply("अब इस यूज़र के मैसेज डिलीट नहीं होंगे।")
+    if message.reply_to_message:
+        target_user_id = message.reply_to_message.from_user.
