@@ -10,9 +10,9 @@ import logging
 
 LOG = logging.getLogger(__name__)
 
-# ====== CONFIG (अपना ID डालें) ======
-BOT_OWNER_ID = 123456789   # ← अपनी numeric Telegram ID यहाँ डालें
-# ======================================
+# ====== CONFIG (अपनी numeric Telegram ID डालें) ======
+BOT_OWNER_ID = 7081885854   # ← यहाँ अपनी ID डालें (numbers only)
+# ======================================================
 
 # active_mutes store: {(chat_id, user_id): end_timestamp}
 active_mutes = {}
@@ -32,50 +32,79 @@ def parse_duration(duration_str):
         return value * 3600
     return value  # seconds default
 
-async def is_admin(client, chat_id, user_id):
-    """Return True if user is bot owner or chat admin/creator."""
-    if user_id == BOT_OWNER_ID:
-        return True
+async def is_admin(client, chat_id, user_id, message=None):
+    """
+    Robust admin check:
+      - True if user_id == BOT_OWNER_ID
+      - True if message.sender_chat exists (anonymous admin posting as channel/chat)
+      - True if get_chat_member says administrator/creator
+    """
     try:
+        # owner shortcut
+        if user_id == BOT_OWNER_ID:
+            LOG.debug("is_admin: user is BOT_OWNER_ID")
+            return True
+
+        # case: message sent as anonymous admin (sender_chat present)
+        if message is not None and getattr(message, "sender_chat", None):
+            LOG.debug("is_admin: message.sender_chat present (anonymous admin). Allowing.")
+            return True
+
+        # normal path: lookup chat member
         member = await client.get_chat_member(chat_id, user_id)
-        return getattr(member, "status", "") in ["administrator", "creator"]
-    except RPCError as e:
-        LOG.warning("is_admin: get_chat_member failed: %s", e)
-        return False
+        status = getattr(member, "status", "")
+        LOG.debug("is_admin: get_chat_member returned status=%s", status)
+        if status in ("administrator", "creator"):
+            return True
+
+    except Exception as e:
+        LOG.exception("is_admin: exception while checking admin: %s", e)
+
+    return False
 
 async def bot_has_delete_permission(client, chat_id):
-    """Robust check whether bot can delete messages in chat."""
+    """
+    Robust check whether bot can delete messages in chat.
+    Returns tuple (bool, info_str) where info_str is diagnostic text.
+    """
     try:
         me = await client.get_me()
         m = await client.get_chat_member(chat_id, me.id)
     except RPCError as e:
         LOG.warning("bot_has_delete_permission: RPCError: %s", e)
-        return False
+        return False, f"get_chat_member failed: {e}"
+
     status = getattr(m, "status", "")
-    # creator always can
+    attrs = []
+    for a in ("can_delete_messages", "can_restrict_members", "can_promote_members", "can_change_info"):
+        if hasattr(m, a):
+            attrs.append(f"{a}={getattr(m, a)}")
+
+    # creator always allowed
     if status == "creator":
-        return True
-    # explicit attribute (pyrogram admin object)
+        return True, f"status=creator; attrs: {', '.join(attrs)}"
+    # explicit attribute
     if getattr(m, "can_delete_messages", None) is True:
-        return True
-    # fallback: if administrator but attribute missing, assume yes (less strict)
+        return True, f"status={status}; attrs: {', '.join(attrs)}"
+    # fallback: if administrator but attribute missing, assume admin can delete (lenient)
     if status == "administrator":
-        return True
-    return False
+        return True, f"status=administrator; attrs: {', '.join(attrs)} (fallback allow)"
+    return False, f"status={status}; attrs: {', '.join(attrs)}"
 
 # --- /start (group only) -> show basic buttons/help ---
 @app.on_message(filters.command("start") & filters.group)
 async def start_cmd(client, message):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("How to Mute", callback_data="amute_help")],
-        [InlineKeyboardButton("How to Unmute", callback_data="aunmute_help")]
+        [InlineKeyboardButton("How to Unmute", callback_data="aunmute_help")],
     ])
     await message.reply("Use buttons below for quick help (group only).", reply_markup=keyboard)
 
 @app.on_callback_query()
 async def cb_handler(client, cq):
     try:
-        if not await is_admin(client, cq.message.chat.id, cq.from_user.id):
+        # allow only admin/owner to use guidance
+        if not await is_admin(client, cq.message.chat.id, getattr(cq.from_user, "id", None), message=cq.message):
             await cq.answer("यह सिर्फ एडमिन/ओनर के लिए है।", show_alert=True)
             return
         if cq.data == "amute_help":
@@ -114,7 +143,8 @@ async def checkperm_cmd(client, message):
 async def amute_cmd(client, message: Message):
     try:
         # only admin or owner can invoke
-        if not await is_admin(client, message.chat.id, message.from_user.id):
+        caller_id = getattr(message.from_user, "id", None)
+        if not await is_admin(client, message.chat.id, caller_id, message=message):
             return await message.reply("सिर्फ ग्रुप के एडमिन या बॉट ओनर ही यह कमांड चला सकते हैं।")
 
         parts = message.text.split(maxsplit=1)
@@ -148,13 +178,12 @@ async def amute_cmd(client, message: Message):
                             continue
 
         if not target_user_id:
-            return await message.reply("यूज़र नहीं मिला — कृपया रिप्लाई करें या सही से टैग करें।")
+            return await message.reply("यूज़र नहीं मिला — कृपया रिप्लाई करें या सही से टैग/मेंशन करें।")
 
         # check bot permission
-        if not await bot_has_delete_permission(client, message.chat.id):
-            # give more diagnostic hint
-            await message.reply("बॉट के पास 'Delete messages' परमिशन नहीं दिख रही। /checkperm चलाकर पुष्टि करें।")
-            return
+        ok, info = await bot_has_delete_permission(client, message.chat.id)
+        if not ok:
+            return await message.reply(f"बॉट के पास 'Delete messages' परमिशन नहीं दिख रही। /checkperm चलाकर पुष्टि करें.\nDetails: {info}")
 
         key = (message.chat.id, target_user_id)
         end_ts = time.time() + duration
@@ -190,7 +219,7 @@ async def amute_cmd(client, message: Message):
                 LOG.debug("search_messages error: %s", e)
 
             # very short sleep to keep deletions near-instant
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.4)
 
     except Exception as e:
         LOG.exception("amute_cmd error: %s", e)
@@ -203,7 +232,8 @@ async def amute_cmd(client, message: Message):
 @app.on_message(filters.command("aunmute", prefixes="/") & filters.group)
 async def aunmute_cmd(client, message: Message):
     try:
-        if not await is_admin(client, message.chat.id, message.from_user.id):
+        caller_id = getattr(message.from_user, "id", None)
+        if not await is_admin(client, message.chat.id, caller_id, message=message):
             return await message.reply("सिर्फ ग्रुप के एडमिन या बॉट ओनर ही यह कमांड चला सकते हैं।")
 
         target_user_id = None
