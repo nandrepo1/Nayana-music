@@ -11,9 +11,8 @@ git()
 dbb()
 heroku()
 
-nand = Shruti()
+nand = Shruti()   # <-- आपका main bot client
 userbot = Userbot()
-
 
 from .platforms import *
 
@@ -24,3 +23,8 @@ Spotify = SpotifyAPI()
 Resso = RessoAPI()
 Telegram = TeleAPI()
 YouTube = YouTubeAPI()
+
+# ------------- FIX BELOW ---------------
+# Export your bot instance as "app"
+app = nand
+# ---------------------------------------
